@@ -56,7 +56,7 @@ use Carp;
 use Socket;
 use Fcntl;
 
-our $VERSION = '0.00_01';
+our $VERSION = '0.01';
 $VERSION = eval $VERSION;  # see L<perlmodstyle>
 
 =head1 Package Methods
@@ -67,26 +67,60 @@ Constructor for a new UDP Wheel object. OPTIONS is a key => value pair list spec
 
 =over
 
-=item LocalAddr (required)
+=item LocalAddr
 
-=item LocalPort (required)
+=item LocalPort
+
+(Required Pair)
 
 Specify the local IP address and port for the created socket. LocalAddr should be in dotted-quad notation,
 and LocalPort should be an integer. This module will not resolve names to numbers at all.
 
-=item PeerAddr (optional)
+=item PeerAddr
 
-=item PeerPort (optional)
+=item PeerPort
+
+(Optional Pair)
 
 Specify the remote IP address and port for the created socket. As above, PeerAddr should be in dotted-quad
-notation, and PeerPort should be an integer. No names will be resolved. These arguments are optional, and if
-not specified a pair will be required during the ->put() call.
+notation, and PeerPort should be an integer. These arguments are used to perform a C connect(2) on the socket,
+which means that outbound datagrams will be sent to this address by default AND inbound datagrams from sources
+other than this peer will be ignored. If you want to just set a default destination for packets, use the
+DefaultAddr and DefaultPort items instead.
 
-=item InputEvent (optional)
+=item DefaultAddr
+
+=item DefaultPort
+
+(Optional Pair)
+
+Dotted quad, and integer (respectively) options for the default destination of datagrams originating from this
+wheel. This setting will override the PeerAddr and PeerPort on each put() method, but you can override this
+by passing arguments directly to the put() method.
+
+=item InputEvent
+
+(Optional)
 
 Specify the event to be invoked via Kernel->yield when a packet arrives on this socket. Currently all incoming
 data is truncated to 1500 bytes. If you do not specify an event, the wheel will not ask the kernel to pass
 incoming datagrams to it, and therefore this wheel will not hold your session alive.
+
+=item InputFilter
+
+(Required if InputEvent defined)
+
+Assign a POE::Filter object to the input side of this wheel.
+
+=item OutputFilter
+
+(Required if you want to call the put method)
+
+Assign a POE::Filter object to the output side of this wheel.
+
+=item Filter
+
+Shorthand for assigning the same filter object to both the InputFilter and OutputFilter arguments.
 
 =back
 
@@ -102,7 +136,7 @@ sub new {
 	my %sockopts;
 
 	foreach (qw(LocalAddr LocalPort PeerAddr PeerPort)) {
-		$sockopts{$_} = $opts{$_} if exists( $opts{$_} );
+		$sockopts{$_} = delete( $opts{$_} ) if exists( $opts{$_} );
 	}
 
 	$self->_open( %sockopts );
@@ -111,26 +145,70 @@ sub new {
 	my $read_event = $self->{read_event} = ref($self) . "($id) -> select read";
 	my $write_event = $self->{write_event} = ref($self) . "($id) -> select write";
 
+	if (exists( $opts{DefaultAddr} ) or exists( $opts{DefaultPort} )) {
+		croak "DefaultAddr is required if DefaultPort is specified."
+			unless exists( $opts{DefaultAddr} );
+		croak "DefaultPort is required if DefaultAddr is specified."
+			unless exists( $opts{DefaultPort} );
+
+		my $addr = inet_aton( $opts{DefaultAddr} )
+			or croak( "Supplied 'DefaultAddr' value '$opts{DefaultAddr}' caused inet_aton failure: $!" );
+
+		my $spec = pack_sockaddr_in( $opts{DefaultPort}, $addr )
+			or croak( "Supplied 'DefaultPort' value '$opts{DefaultPort}' caused pack_sockaddr_in failure: $!" );
+
+		$self->{DefaultAddr} = delete $opts{DefaultAddr};
+		$self->{DefaultPort} = delete $opts{DefaultPort};
+		$self->{default_send} = $spec;
+	}
+
+	if (exists( $opts{Filter} )) {
+		my $filter = delete $opts{Filter};
+		$opts{InputFilter} ||= $filter;
+		$opts{OutputFilter} ||= $filter;
+	}
+
+	if (exists( $opts{InputFilter} )) {
+		$self->{InputFilter} = delete $opts{InputFilter};
+	}
+
+	if (exists( $opts{OutputFilter} )) {
+		$self->{OutputFilter} = delete $opts{OutputFilter};
+	}
+
 	if (exists( $opts{InputEvent} )) {
-		my $input_event = $self->{InputEvent} = $opts{InputEvent};
+		croak "InputFilter option is required if InputEvent is defined."
+			unless exists($self->{InputFilter});
+
+		my $filter = \$self->{InputFilter};
+		
+		my $input_event = $self->{InputEvent} = delete $opts{InputEvent};
 
 		$poe_kernel->state( $read_event, sub {
 			my ($kernel, $socket) = @_[KERNEL, ARG0];
 			$! = undef;
-			while( my $addr = recv( $socket, my $input, 1500, MSG_DONTWAIT ) ) {
+			while( my $addr = recv( $socket, my $input = "", 1500, MSG_DONTWAIT ) ) {
 				if (defined( $addr )) {
-					my $thing = {
-						payload => $input,
-					};
+					my %input_data;
 
 					if ($addr) {
-						my ($port, $addr) = sockaddr_in( $addr )
+						my ($port, $addr) = unpack_sockaddr_in( $addr )
 							or warn( "sockaddr_in failure: $!" );
-						$thing->{addr} = inet_ntoa( $addr );
-						$thing->{port} = $port;
+						$input_data{addr} = inet_ntoa( $addr );
+						$input_data{port} = $port;
 					}
-					
-					$poe_kernel->yield( $input_event, $thing, $id );
+
+					$$filter->get_one_start( [ $input ] );
+
+					while (my $records = $$filter->get_one) {
+						last unless @$records;
+						foreach my $payload (@$records) {
+							$poe_kernel->yield( $input_event, {
+								payload => $payload,
+								%input_data,
+							}, $id );
+						}
+					}
 				}
 				else {
 					warn "recv failure: $!";
@@ -144,6 +222,9 @@ sub new {
 
 #	Does anyone know if I should watch for writability on the socket at all? it's pretty hard to test
 #	to see if UDP can ever return EAGAIN because I can't get it to go fast enough to blast past the buffers.
+
+	croak "Extra options passed to new(): " . join( ', ', map { "'$_'" } keys %opts )
+		if keys %opts;
 
 	return $self;
 }
@@ -160,6 +241,9 @@ sub _open {
 	fcntl( $sock, F_SETFL, O_NONBLOCK | O_RDWR )
 		or die( "fcntl problem: $!" );
 		
+	setsockopt( $sock, SOL_SOCKET, SO_REUSEADDR, 1 )
+		or die( "setsockopt SO_REUSEADDR failed: $!" );
+
 	{
 		my $addr = inet_aton( $opts{LocalAddr} )
 			or die( "inet_aton problem: $!" );
@@ -193,7 +277,8 @@ following useful keys in them:
 
 =item payload
 
-The actual data you wish to send in the packet.
+An arrayref of records you wish to put through the filter and send in datagrams. The arrayref
+is used to allow more than one logical record per datagram.
 
 =item addr
 
@@ -224,15 +309,31 @@ sub put {
 		}
 
 		my $payload = $thing->{payload} or die;
+
+		die unless ref($payload) eq 'ARRAY';
+		
+		my $filter = $self->{OutputFilter};
+		my $records = $filter->put( $payload );
 		
 		my $bytes;
 		if (exists( $thing->{addr} ) or exists( $thing->{port} )) {
 			my $addr = $thing->{addr} or die;
 			my $port = $thing->{port} or die;
-			$bytes = send( $sock, $payload, MSG_DONTWAIT, sockaddr_in( $port,inet_aton( $addr ) ) );
+			
+			foreach my $output (@$records) {
+				$bytes = send( $sock, $output, MSG_DONTWAIT, sockaddr_in( $port,inet_aton( $addr ) ) );
+			}
+		}
+		elsif (exists( $self->{default_send} )) {
+			my $default_send = $self->{default_send};
+			foreach my $output (@$records) {
+				$bytes = send( $sock, $output, MSG_DONTWAIT, $default_send );
+			}
 		}
 		else {
-			$bytes = send( $sock, $payload, MSG_DONTWAIT );
+			foreach my $output (@$records) {
+				$bytes = send( $sock, $output, MSG_DONTWAIT );
+			}
 		}
 
 		if (!defined( $bytes )) {

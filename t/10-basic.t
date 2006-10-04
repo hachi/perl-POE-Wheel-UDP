@@ -4,6 +4,7 @@ use Test::More tests => 100;
 
 use POE;
 use POE::Wheel::UDP;
+use POE::Filter::Stream;
 
 POE::Session->create(
 	package_states => [
@@ -19,6 +20,7 @@ sub _start {
 		LocalPort => '2456',
 		PeerAddr => '127.0.0.1',
 		PeerPort => '2457',
+		Filter => POE::Filter::Stream->new(),
 	);
 
 	my $wheel2 = POE::Wheel::UDP->new(
@@ -27,6 +29,7 @@ sub _start {
 		PeerAddr => '127.0.0.1',
 		PeerPort => '2456',
 		InputEvent => 'wheel2_in',
+		Filter => POE::Filter::Stream->new(),
 	);
 
 	$heap->{wheel1} = $wheel1;
@@ -44,7 +47,7 @@ sub sendone {
 		return;
 	}
 
-	my $thing = { payload => $num };
+	my $thing = { payload => [ $num ] };
 	$heap->{flags}->{$num}++;
 	$heap->{wheel1}->put( $thing );
 	$num++;
