@@ -5,4 +5,3 @@ MANIFEST
 README
 t/00-use.t
 t/10-basic.t
-META.yml                                 Module meta-data (added by MakeMaker)
