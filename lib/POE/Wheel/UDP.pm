@@ -18,13 +18,14 @@ POE::Wheel::UDP - POE Wheel for UDP handling.
 	  PeerAddr => '10.0.0.2',
 	  PeerPort => 1235,
 	  InputEvent => 'input',
+	  Filter => POE::Filter::Stream->new,
 	);
 	$wheel->put(
 	  {
-            payload => 'This datagram will go to the default address.',
+            payload => [ 'This datagram will go to the default address.' ],
 	  },
 	  {
-            payload => 'This datagram will go to the explicit address and port I have paired with it.',
+            payload => [ 'This datagram will go to the explicit address and port I have paired with it.' ],
 	    addr => '10.0.0.3',
 	    port => 1236,
 	  },
@@ -56,7 +57,7 @@ use Carp;
 use Socket;
 use Fcntl;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 $VERSION = eval $VERSION;  # see L<perlmodstyle>
 
 =head1 Package Methods
@@ -198,17 +199,22 @@ sub new {
 						$input_data{port} = $port;
 					}
 
+					$input_data{bytes} = length( $input );
+					
+					local $POE::Filter::DATAGRAM = 1;
+
 					$$filter->get_one_start( [ $input ] );
 
+					my @payload;
 					while (my $records = $$filter->get_one) {
 						last unless @$records;
-						foreach my $payload (@$records) {
-							$poe_kernel->yield( $input_event, {
-								payload => $payload,
-								%input_data,
-							}, $id );
-						}
+						push @payload, @$records;
 					}
+					
+					$poe_kernel->yield( $input_event, {
+						payload => \@payload,
+						%input_data,
+					}, $id );
 				}
 				else {
 					warn "recv failure: $!";
@@ -279,6 +285,11 @@ following useful keys in them:
 
 An arrayref of records you wish to put through the filter and send in datagrams. The arrayref
 is used to allow more than one logical record per datagram.
+
+=item bytes
+
+How many bytes were read from this datagram. Currently a maximum of 1500 will be read, and
+datagrams which are larger will be truncated.
 
 =item addr
 
@@ -385,7 +396,7 @@ Specifies the address and port from which we received this datagram.
 
 =item payload
 
-The actual contents of the datagram.
+An arrayref of records built from the actual datagram going through the filters. 
 
 =back
 
@@ -395,13 +406,13 @@ The wheel id for the wheel that fired this event.
 
 =back
 
-=head1 UPCOMING FEATURES
+=head1 Filter semantics
+
+Datagram filter design is not guaranteed yet, we need to make sure the design I put in place here is workable.
+
+=head1 Upcoming features
 
 =over
-
-=item *
-
-CFEDDE would like to see filter support in the UDP wheel... I would love to have a piece of pie. Let's see who gets what they want first.
 
 =item *
 

@@ -14,5 +14,5 @@ WriteMakefile(
     }, # e.g., Module::Name => 1.1
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM  => 'lib/POE/Wheel/UDP.pm', # retrieve abstract from module
-       AUTHOR         => 'A. U. Thor <hachi@>') : ()),
+       AUTHOR         => 'Jonathan Steinert <hachi@cpan.org>') : ()),
 );

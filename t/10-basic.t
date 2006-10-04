@@ -58,13 +58,17 @@ sub wheel2_in {
 	my ($kernel, $heap, $input) = @_[KERNEL, HEAP, ARG0];
 	my $payload = $input->{payload};
 	my $flags = $heap->{flags};
-	if( exists( $flags->{$payload} )) {
-		delete $flags->{$payload};
-		pass( "Got $payload" );
+
+	foreach my $flag (@$payload) {
+		if( exists( $flags->{$flag} )) {
+			delete $flags->{$flag};
+			pass( "Got $flag" );
+		}
+		else {
+			fail( "$flag arrived without being keyed" );
+		}
 	}
-	else {
-		fail( "$input arrived without being keyed" );
-	}
+	
 	if (keys %$flags == 0) {
 		$kernel->delay( cleanup => 0 );
 	}
