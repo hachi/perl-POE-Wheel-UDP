@@ -54,11 +54,35 @@ use base 'POE::Wheel';
 
 use POE;
 use Carp;
-use Socket;
-use Fcntl;
+use Socket qw(
+	      SOL_SOCKET
+	      SO_REUSEADDR
+	      SOCK_DGRAM
+	      PF_INET
+	      inet_aton
+	      inet_ntoa
+	      sockaddr_in
+	      unpack_sockaddr_in
+	      );
+use Fcntl qw(
+             F_SETFL
+	     O_NONBLOCK
+	     O_RDWR
+	     );
 
 our $VERSION = '0.02';
 $VERSION = eval $VERSION;  # see L<perlmodstyle>
+
+sub WARNINGS () { 0 }
+
+BEGIN {
+	
+	my $win32 = $^O =~ m/^MSWin32$/;
+	eval "sub WIN32 () { $win32 }";
+
+	my $msg_dontwait = $win32 ? 0 : Socket::MSG_DONTWAIT();
+	eval "sub MSG_DONTWAIT () { $msg_dontwait }";
+}
 
 =head1 Package Methods
 
@@ -244,9 +268,12 @@ sub _open {
 	socket( my $sock, PF_INET, SOCK_DGRAM, $proto )
 		or die( "socket() failure: $!" );
 
-	fcntl( $sock, F_SETFL, O_NONBLOCK | O_RDWR )
-		or die( "fcntl problem: $!" );
-		
+	if (WIN32) {
+		_win32_nonblock($sock);
+	} else {
+		_unix_nonblock($sock);
+	}
+
 	setsockopt( $sock, SOL_SOCKET, SO_REUSEADDR, 1 )
 		or die( "setsockopt SO_REUSEADDR failed: $!" );
 
@@ -373,6 +400,23 @@ sub DESTROY {
 sub allocate_wheel_id; # try to cancel this method from being inhereted.
 sub free_wheel_id;
 
+sub _unix_nonblock {
+	my $sock = shift;
+
+	return 1 if IO::Handle::blocking( $sock, 0 );
+	warn "IO::Handle::blocking call failed to set nonblock mode: $!" if WARNINGS;
+
+	return 1 if fcntl( $sock, F_SETFL, O_NONBLOCK | O_RDWR );
+	warn "fcntl call failed to set nonblock mode: $!" if WARNINGS;
+	
+	return 0;
+}
+
+sub _win32_nonblock {
+	my $sock = shift;
+	return 0;
+}
+	
 1;
 __END__
 
@@ -441,3 +485,5 @@ it under the same terms as Perl itself, either Perl version 5.8.8 or,
 at your option, any later version of Perl 5 you may have available.
 
 =cut
+
+# vim: ts=8 noexpandtab filetype=perl
